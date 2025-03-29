@@ -9,6 +9,10 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"strings"
+	"sync"
+	"time"
+	"bufio"
 
 	"github.com/cilium/ebpf/link"
 	"github.com/cilium/ebpf/perf"
@@ -22,8 +26,21 @@ type Event struct {
 	Filename [256]byte
 	Op       [10]byte
 }
-
+var (
+	allowedFiles []string
+	mu           sync.RWMutex
+)
 func main() {
+
+    
+	updateAllowedFiles()
+	go func() {
+		for {
+			time.Sleep(10 * time.Second)
+			updateAllowedFiles()
+		}
+	}()
+
 	objs := bpfObjects{}
 	if err := loadBpfObjects(&objs, nil); err != nil {
 		log.Fatalf("loading objects: %v", err)
@@ -78,11 +95,52 @@ func main() {
 			command := string(bytes.TrimRight(event.Command[:], "\x00"))
 			filename := string(bytes.TrimRight(event.Filename[:], "\x00"))
 			operation := string(bytes.TrimRight(event.Op[:], "\x00"))
-
+            
+			if !isAllowedFile(filename) {
+				continue
+			}
 			log.Printf("PID: %d, Process: %s, Operation: %s, File: %s\n", event.Pid, command, operation, filename)
 		}
 	}()
 
 	<-sig
 	fmt.Println("\nExiting...")
+}
+
+func updateAllowedFiles() {
+    file, err := os.Open("allowed_files.txt")
+    if err != nil {
+        log.Printf("Error opening allowed_files.txt: %v", err)
+        return
+    }
+    defer file.Close()
+
+    var files []string
+    scanner := bufio.NewScanner(file)
+    for scanner.Scan() {
+        line := strings.TrimSpace(scanner.Text())
+        if line != "" {
+            files = append(files, line)
+        }
+    }
+    if err := scanner.Err(); err != nil {
+        log.Printf("Error reading allowed_files.txt: %v", err)
+        return
+    }
+
+    mu.Lock()
+    allowedFiles = files
+    mu.Unlock()
+}
+
+func isAllowedFile(filename string) bool {
+    mu.RLock()
+    defer mu.RUnlock()
+
+    for _, allowed := range allowedFiles {
+        if strings.HasPrefix(filename, allowed) {
+            return true
+        }
+    }
+    return false
 }
